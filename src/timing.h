@@ -1,0 +1,87 @@
+#pragma once
+
+#include "types.h"
+#include <cmath>
+#include <cstddef>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string_view>
+
+// I-cache or D-cache geometry for a CPU model.
+struct CacheConfig {
+    size_t size;
+    size_t lineSize;
+    size_t ways;
+};
+
+// Bitmask of registers read and written by an instruction (0-7=Dn, 8-15=An).
+// Used by 040/060 pipeline analysis to detect data hazards between instructions.
+struct RegUsage {
+    uint16_t read = 0;
+    uint16_t write = 0;
+};
+
+// Determines which registers an instruction reads and writes.
+RegUsage regUsage(const Instruction& inst);
+// Computes the byte length of an encoded instruction (always positive and even).
+int computeInstSize(const Instruction& inst);
+
+// Globals
+inline int busCycles = 4;
+inline int busWidthBytes = 2;
+inline double timingEstimate = 0.5;
+
+// Rounds cycle count up to the next bus access boundary.
+inline int roundToBus(int cycles) {
+    if (busCycles <= 1 || cycles <= 0) return cycles;
+    return ((cycles + busCycles - 1) / busCycles) * busCycles;
+}
+
+// Collapses a variable-timing result to a single bus-rounded value using timingEstimate.
+// 0.0 = best case (min), 1.0 = worst case (max), 0.5 = midpoint.
+inline Timing estimateTiming(Timing t) {
+    if (t.a != t.b) {
+        int lo = t.min(), hi = t.max();
+        int v = roundToBus(static_cast<int>(
+            std::round(lo + timingEstimate * (hi - lo))));
+        t.a = t.b = v;
+    }
+    return t;
+}
+
+// Abstract interface for CPU-specific instruction timing.
+// Subclasses override computeTime(); the public time() wrapper applies bus rounding.
+class TimingBase {
+public:
+    virtual ~TimingBase() = default;
+
+    // Returns bus-rounded timing for an instruction.
+    Timing time(const Instruction& inst) {
+        auto t = computeTime(inst);
+        t.a = roundToBus(t.a);
+        t.b = roundToBus(t.b);
+        return t;
+    }
+
+    virtual Timing time(std::span<const Instruction> block) {
+        Timing total;
+        for (auto& inst : block) {
+            total += time(inst);
+        }
+        return total;
+    }
+
+    virtual int busAccessCycles() const { return 4; }
+    virtual int busWidth() const { return 2; }
+    virtual const char* name() const = 0;
+    virtual std::optional<CacheConfig> iCache() const { return std::nullopt; }
+    virtual std::optional<CacheConfig> dCache() const { return std::nullopt; }
+
+protected:
+    // Subclasses implement raw (pre-rounding) instruction timing here.
+    virtual Timing computeTime(const Instruction& inst) = 0;
+};
+
+// Factory that returns the timing engine for a CPU name ("000", "020", etc.).
+std::unique_ptr<TimingBase> createTiming(std::string_view cpu);
