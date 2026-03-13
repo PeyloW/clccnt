@@ -9,8 +9,6 @@ namespace {
 class Timing030 : public TimingBase {
     std::unique_ptr<TimingBase> base;
 public:
-    using TimingBase::time;
-
     Timing030() : base(makeTiming020()) {}
 
     // Same instruction timing as 020
@@ -18,16 +16,21 @@ public:
         return base->time(inst);
     }
 
+    // Skip bus rounding (020 already returns exact values)
+    Timing time(const Instruction& inst) override {
+        return computeTime(inst);
+    }
+
     Timing time(std::span<const Instruction> block) override {
         return base->time(block);
     }
 
-    int busAccessCycles() const override { return 2; }
-    int busWidth() const override { return 4; }
+    int busAccessCycles() const override { return base->busAccessCycles(); }
+    int busWidth() const override { return base->busWidth(); }
     const char* name() const override { return "MC68030"; }
 
     std::optional<CacheConfig> iCache() const override {
-        return CacheConfig{256, 4, 1};
+        return base->iCache();
     }
 
     std::optional<CacheConfig> dCache() const override {

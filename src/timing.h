@@ -50,14 +50,38 @@ inline Timing estimateTiming(Timing t) {
     return t;
 }
 
+// Decomposed bus timing for 020/030: separates internal cycles from bus accesses.
+// Allows accurate computation for different bus widths (16-bit vs 32-bit).
+struct BusCost {
+    int head = 0;        // internal cycles (no bus access)
+    int reads = 0;       // data read bus accesses
+    int prefetches = 0;  // instruction prefetch accesses (always long-word)
+    int writes = 0;      // data write bus accesses
+
+    // Convert to cycles. dataLong=true when data reads/writes are long-word sized.
+    int toCycles(bool dataLong = false) const {
+        int dataScale = (dataLong && busWidthBytes < 4) ? 2 : 1;
+        int pfScale = (busWidthBytes < 4) ? 2 : 1;
+        return head
+            + (reads * dataScale + writes * dataScale) * busCycles
+            + prefetches * pfScale * busCycles;
+    }
+
+    BusCost operator+(BusCost rhs) const {
+        return {head + rhs.head, reads + rhs.reads,
+                prefetches + rhs.prefetches, writes + rhs.writes};
+    }
+};
+
 // Abstract interface for CPU-specific instruction timing.
 // Subclasses override computeTime(); the public time() wrapper applies bus rounding.
 class TimingBase {
 public:
     virtual ~TimingBase() = default;
 
-    // Returns bus-rounded timing for an instruction.
-    Timing time(const Instruction& inst) {
+    // Returns timing for an instruction. Default applies bus rounding;
+    // 020/030 override to return exact (non-rounded) values.
+    virtual Timing time(const Instruction& inst) {
         auto t = computeTime(inst);
         t.a = roundToBus(t.a);
         t.b = roundToBus(t.b);
