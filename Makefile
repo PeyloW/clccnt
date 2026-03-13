@@ -10,7 +10,7 @@ SRCS := $(wildcard $(SRC_DIR)/*.cpp)
 OBJS := $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(SRCS))
 BIN  := $(BUILD_DIR)/clccnt
 
-.PHONY: all clean install uninstall
+.PHONY: all clean install uninstall verify
 
 all: $(BIN)
 
@@ -29,6 +29,9 @@ install: $(BIN)
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/clccnt
+
+verify: $(BIN)
+	python3 verification/verify.py $(BIN)
 
 clean:
 	rm -rf $(BUILD_DIR)
