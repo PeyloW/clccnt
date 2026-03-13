@@ -3,7 +3,9 @@
 #include "m68k.h"
 #include "parse.h"
 #include "timing.h"
+#include <algorithm>
 #include <cstdio>
+#include <numeric>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -134,6 +136,16 @@ void printVerbose(const FunctionResult& fr) {
         }
     }
 
+    // Compute block body totals (sum of instruction timing within each block)
+    std::vector<Timing> blockTotal(fr.blocks.size());
+    for (auto& b : fr.blocks) {
+        for (int i = b.firstLine; i <= b.lastLine; i++) {
+            if (i < 0 || i >= (int)fr.lines.size()) continue;
+            if (!fr.lines[i].inst) continue;
+            blockTotal[b.id] += fr.lines[i].timing;
+        }
+    }
+
     for (auto& b : fr.blocks) {
         int ind = 2 * loopDepth[b.id];
         if (!b.label.empty()) {
@@ -150,33 +162,48 @@ void printVerbose(const FunctionResult& fr) {
             auto& t = sl.timing;
             auto m = sl.inst->mnemonic;
             auto instStr = sl.inst->toString();
+            bool isLast = (i == b.lastLine);
 
-            // Format: line_num: [indent] instruction              min   max
             int pad = std::max(1, 36 - ind);
             if (isCondBranch(m) || isDbcc(m)) {
-                // Branch: show not-taken (max) and taken (min)
-                std::printf("  %4d: %*s%-*s %4d  %4d\n",
+                std::printf("  %4d: %*s%-*s %4d  %4d",
                     sl.lineNum, ind, "", pad, instStr.c_str(),
                     t.b, t.a);
             } else if (t.a != t.b) {
-                std::printf("  %4d: %*s%-*s %4d  %4d\n",
+                std::printf("  %4d: %*s%-*s %4d  %4d",
                     sl.lineNum, ind, "", pad, instStr.c_str(),
                     t.min(), t.max());
             } else {
-                std::printf("  %4d: %*s%-*s %4d\n",
+                std::printf("  %4d: %*s%-*s %4d      ",
                     sl.lineNum, ind, "", pad, instStr.c_str(),
                     t.a);
             }
+
+            if (isLast) {
+                auto& bt = blockTotal[b.id];
+                if (bt.a != bt.b) {
+                    std::printf("  = %5d %5d", bt.min(), bt.max());
+                } else {
+                    std::printf("  = %5d", bt.a);
+                }
+            }
+            std::printf("\n");
         }
     }
 
-    // Print paths
-    for (auto& p : fr.paths) {
-        std::string pathStr = formatPath(p);
+    // Print paths sorted by ascending cost
+    std::vector<size_t> order(fr.paths.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        return fr.paths[a].cycles.max() < fr.paths[b].cycles.max();
+    });
+    for (auto idx : order) {
+        auto& p = fr.paths[idx];
+        auto label = "path " + formatPath(p) + ":";
         if (p.cycles.a == p.cycles.b) {
-            std::printf("  %40s: %5d\n", ("path " + pathStr).c_str(), p.cycles.a);
+            std::printf("  %54s = %5d\n", label.c_str(), p.cycles.a);
         } else {
-            std::printf("  %40s: %5d-%d\n", ("path " + pathStr).c_str(),
+            std::printf("  %54s = %5d %5d\n", label.c_str(),
                 p.cycles.min(), p.cycles.max());
         }
     }
