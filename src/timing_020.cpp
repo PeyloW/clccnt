@@ -36,15 +36,52 @@ constexpr BusCost fea(const EffectiveAddr& ea, std::optional<OpSize> sz) {
 }
 
 // --- 11.6.2 Fetch Immediate Effective Address (fiea) ---
-// Cost for #imm,EA instructions: immediate fetch cost + destination EA cost.
+// NCC values from MC68030UM Section 11.6.2 tables.
+// Indexed by [sizeIdx(sz)][eaIndex(dest.mode)].
+// Pipeline overlaps make these NOT simply fieaImm + feaTable.
+constexpr BusCost fieaTable[2][13] = {
+    // #imm.bw (word immediate)
+    {
+        {0, 0, 1, 0},  //  0 Dn        2(0/1/0)
+        {0, 0, 1, 0},  //  1 An        2(0/1/0)
+        {0, 1, 1, 0},  //  2 (An)      4(1/1/0)
+        {1, 1, 1, 0},  //  3 (An)+     5(1/1/0)
+        {0, 1, 1, 0},  //  4 -(An)     4(1/1/0)
+        {1, 1, 1, 0},  //  5 d(An)     5(1/1/0)
+        {2, 1, 2, 0},  //  6 d(An,Xn)  8(1/2/0)
+        {2, 1, 1, 0},  //  7 abs.W     6(1/1/0)
+        {1, 1, 2, 0},  //  8 abs.L     7(1/2/0)
+        {1, 1, 1, 0},  //  9 d(PC)     5(1/1/0)
+        {2, 1, 2, 0},  // 10 d(PC,Xn)  8(1/2/0)
+        {0, 0, 2, 0},  // 11 #imm.bw   4(0/2/0) (not valid dest)
+        {0, 0, 2, 0},  // 12 #imm.l    (placeholder)
+    },
+    // #imm.l (long immediate)
+    {
+        {2, 0, 1, 0},  //  0 Dn        4(0/1/0)
+        {2, 0, 1, 0},  //  1 An        4(0/1/0)
+        {1, 1, 1, 0},  //  2 (An)      5(1/1/0)
+        {3, 1, 1, 0},  //  3 (An)+     7(1/1/0)
+        {2, 1, 1, 0},  //  4 -(An)     6(1/1/0)
+        {2, 1, 2, 0},  //  5 d(An)     8(1/2/0)
+        {4, 1, 2, 0},  //  6 d(An,Xn) 10(1/2/0)
+        {2, 1, 2, 0},  //  7 abs.W     8(1/2/0)
+        {3, 1, 2, 0},  //  8 abs.L     9(1/2/0)
+        {2, 1, 2, 0},  //  9 d(PC)     8(1/2/0)
+        {4, 1, 2, 0},  // 10 d(PC,Xn) 10(1/2/0)
+        {2, 0, 2, 0},  // 11 #imm.bw   6(0/2/0) (not valid dest)
+        {2, 0, 2, 0},  // 12 #imm.l    (placeholder)
+    },
+};
+
 constexpr BusCost fieaImm(std::optional<OpSize> sz) {
-    return feaTable[isLong(sz) ? feaImmL : 11];
+    return fieaTable[sizeIdx(sz)][0]; // Same as Dn entry
 }
 
 constexpr BusCost fiea(const EffectiveAddr& dest, std::optional<OpSize> sz) {
-    BusCost imm = fieaImm(sz);
-    if (dest.mode == AddrMode::dn || dest.mode == AddrMode::an) return imm;
-    return imm + feaTable[eaIndex(dest.mode)];
+    int idx = eaIndex(dest.mode);
+    if (idx == 11 && isLong(sz)) idx = feaImmL; // not valid dest, but safe
+    return fieaTable[sizeIdx(sz)][idx];
 }
 
 // --- Calculate Effective Address (cea) ---
@@ -308,16 +345,16 @@ protected:
 
         // --- Bit field (11.6.14) ---
         case Mnemonic::bftst:
-            timeBitField(getOp(inst), t, {6, 0, 1, 0}, {8, 1, 1, 0}, {8, 2, 1, 0});
+            timeBitField(getOp(inst), t, {6, 0, 1, 0}, {6, 1, 1, 0}, {8, 2, 1, 0});
             break;
         case Mnemonic::bfextu: case Mnemonic::bfexts:
-            timeBitField(getOp(inst), t, {8, 0, 1, 0}, {6, 1, 1, 0}, {8, 2, 1, 0});
+            timeBitField(getOp(inst), t, {8, 0, 1, 0}, {8, 1, 1, 0}, {12, 2, 1, 0});
             break;
         case Mnemonic::bfffo:
-            timeBitField(getOp(inst), t, {18, 0, 1, 0}, {16, 1, 1, 0}, {18, 2, 1, 0});
+            timeBitField(getOp(inst), t, {18, 0, 1, 0}, {18, 1, 1, 0}, {22, 2, 1, 0});
             break;
         case Mnemonic::bfchg: case Mnemonic::bfclr: case Mnemonic::bfset:
-            timeBitField(getOp(inst), t, {12, 0, 1, 0}, {8, 1, 1, 1}, {10, 2, 1, 2});
+            timeBitField(getOp(inst), t, {12, 0, 1, 0}, {8, 1, 1, 1}, {12, 2, 1, 2});
             break;
         case Mnemonic::bfins:
             timeBitField(inst.dst ? &*inst.dst : nullptr, t, {10, 0, 1, 0}, {6, 1, 1, 1}, {8, 2, 1, 2});
@@ -783,7 +820,7 @@ private:
                 // ROXd mem: 4(0/1/0) + fea (note: manual says 4(0/1/0), no write?)
                 // Actually the manual has ROXd Mem as 4(0/1/0). This seems like read-only.
                 // But ROXd Mem by 1 is a read-modify-write. Let's use the given timing.
-                base = {0, 0, 1, 1};  // 4(0/1/1) approximate
+                base = {0, 0, 1, 0};  // 4(0/1/0) per reference
             } else {
                 base = {0, 0, 1, 1};  // LSd/ASR mem: 4(0/1/1) + fea
             }
@@ -862,11 +899,8 @@ private:
             }
         } else {
             // BTST Dn,Dn or BTST #,Dn: 4(0/1/0)
-            BusCost base = {2, 0, 1, 0};
-            if (isImm)
-                t.a = t.b = (base + fieaImm(OpSize::word)).toCycles();  // add imm fetch
-            else
-                t.a = t.b = base.toCycles();
+            // Base already includes the immediate prefetch; no fieaImm needed.
+            t.a = t.b = BusCost{2, 0, 1, 0}.toCycles();
         }
     }
 
@@ -885,11 +919,8 @@ private:
             }
         } else {
             // BCHG/BCLR/BSET Dn,Dn or #,Dn: 6(0/1/0)
-            BusCost base = {4, 0, 1, 0};
-            if (isImm)
-                t.a = t.b = (base + fieaImm(OpSize::word)).toCycles();
-            else
-                t.a = t.b = base.toCycles();
+            // Base already includes the immediate prefetch; no fieaImm needed.
+            t.a = t.b = BusCost{4, 0, 1, 0}.toCycles();
         }
     }
 

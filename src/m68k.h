@@ -86,6 +86,19 @@ constexpr bool isRegDirect(AddrMode m) {
     return m == AddrMode::dn || m == AddrMode::an;
 }
 
+// True for modes with displacement or address extension words in the
+// instruction stream (used by 040/060 for pipeline interlock costs).
+constexpr bool hasExtWord(AddrMode m) {
+    switch (m) {
+    case AddrMode::disp: case AddrMode::index:
+    case AddrMode::absW: case AddrMode::absL:
+    case AddrMode::pcDisp: case AddrMode::pcIndex:
+        return true;
+    default:
+        return false;
+    }
+}
+
 constexpr bool isLong(std::optional<OpSize> sz) {
     return sz && *sz == OpSize::long_;
 }

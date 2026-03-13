@@ -69,9 +69,9 @@ constexpr int eorMem[2] = {8, 12}, eorReg[2] = {4, 8};
 // Immediate ALU
 constexpr int immSRCCR = 20;
 constexpr int immMem[2] = {12, 20}, immReg[2] = {8, 16};
+constexpr int cmpiMem[2] = {8, 12};  // CMPI: no write-back (compare only)
 
 // ADDQ/SUBQ
-constexpr int quickAn = 8;
 constexpr int quickMem[2] = {8, 12}, quickReg[2] = {4, 8};
 
 // Unary (NEG/NEGX/NOT/CLR)
@@ -91,7 +91,7 @@ constexpr int addxMem[2] = {18, 30}, addxReg[2] = {4, 8};
 constexpr int tstBase = 4;
 
 // TAS
-constexpr int tasMemBase = 10, tasReg = 4;
+constexpr int tasMemBase = 14, tasReg = 4;
 
 // Move SR/CCR
 constexpr int moveToSRBase = 12, moveToCCRBase = 12;
@@ -142,14 +142,15 @@ int timeImmediate(const Instruction& inst) {
         return immSRCCR;
     }
     if (isMem(*inst.dst)) {
-        return immMem[sizeIdx(inst.size)] + eaFetch(*inst.dst, inst.size);
+        auto& base = (inst.mnemonic == Mnemonic::cmpi) ? cmpiMem : immMem;
+        return base[sizeIdx(inst.size)] + eaFetch(*inst.dst, inst.size);
     }
     return immReg[sizeIdx(inst.size)];
 }
 
 int timeQuick(const Instruction& inst) {
     if (!inst.dst) return 4;
-    if (inst.dst->mode == AddrMode::an) return quickAn;
+    if (inst.dst->mode == AddrMode::an) return isLong(inst.size) ? 8 : 4;
     if (isMem(*inst.dst)) {
         return quickMem[sizeIdx(inst.size)] + eaFetch(*inst.dst, inst.size);
     }
