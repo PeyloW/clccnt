@@ -241,7 +241,6 @@ void computeBodyCost(BasicBlock& b, const std::vector<SourceLine>& lines) {
 // Mutable state for DFS path enumeration, shared across recursive calls.
 struct DFSState {
     const std::vector<BasicBlock>& blocks;
-    const std::vector<SourceLine>& lines;
     int loopCount;
     std::vector<PathResult>& results;
     std::vector<int> path;
@@ -251,9 +250,9 @@ struct DFSState {
 };
 
 // Recursively enumerates execution paths through the CFG.
-// Back-edges are treated as loops: the body cost is multiplied by loopCount,
-// then exit edges from cycle blocks are followed to continue the path.
-void dfs(DFSState& state, int blockId, Timing cost) {
+// Back-edges are treated as loops; exit edges from cycle blocks are followed.
+// Cost computation is deferred to computePathCost() after enumeration.
+void dfs(DFSState& state, int blockId) {
     if (blockId < 0 || blockId >= (int)state.blocks.size()) {
         throw Error{2, "internal: dfs blockId " + std::to_string(blockId) + " out of range"};
     }
@@ -261,16 +260,8 @@ void dfs(DFSState& state, int blockId, Timing cost) {
     state.path.push_back(blockId);
     state.visited[blockId] = true;
 
-    Timing cur = cost + b.body;
-
     if (b.isExit) {
-        // Add exit instruction cost
-        int lastIdx = b.lastLine;
-        if (lastIdx >= 0 && lastIdx < (int)state.lines.size() &&
-            state.lines[lastIdx].inst) {
-            cur += state.lines[lastIdx].timing;
-        }
-        state.results.push_back({state.path, state.loops, cur});
+        state.results.push_back({state.path, state.loops, {}});
     } else {
         bool hasForwardEdge = false;
         size_t loopsBefore = state.loops.size();
@@ -294,29 +285,6 @@ void dfs(DFSState& state, int blockId, Timing cost) {
                     }
 
                     if (targetPathIdx >= 0) {
-                        // Compute loop body cost by walking the actual DFS path
-                        Timing loopBody;
-                        for (int pi = targetPathIdx; pi < (int)state.path.size(); pi++) {
-                            int bi = state.path[pi];
-                            loopBody += state.blocks[bi].body;
-                            if (pi + 1 < (int)state.path.size()) {
-                                int nextBi = state.path[pi + 1];
-                                for (auto& e : state.blocks[bi].successors) {
-                                    if (e.target == nextBi) {
-                                        loopBody += {e.cost, e.cost};
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        int backEdgeCost = edge.cost;
-
-                        int extraIters = std::max(0, state.loopCount - 1);
-                        if (extraIters > 0) {
-                            cur += (loopBody + backEdgeCost) * extraIters;
-                        }
-
                         // Record loop annotation for display
                         state.loops.push_back({targetPathIdx,
                             (int)state.path.size() - 1, state.loopCount});
@@ -325,12 +293,10 @@ void dfs(DFSState& state, int blockId, Timing cost) {
                         std::vector<bool> inCycle(state.blocks.size(), false);
                         for (int pi = targetPathIdx; pi < (int)state.path.size(); pi++) {
                             inCycle[state.path[pi]] = true;
-                            // Guard non-header cycle blocks to prevent phantom
-                            // back-edges, but leave the header (back-edge target)
-                            // accessible for legitimate outer loop detection
-                            if (pi != targetPathIdx) {
-                                state.cycleGuard[state.path[pi]]++;
-                            }
+                            // Guard cycle blocks to prevent phantom back-edges.
+                            // The header is guarded here to prevent exit-edge
+                            // targets from creating false nested loops back to it.
+                            state.cycleGuard[state.path[pi]]++;
                         }
 
                         for (int pi = targetPathIdx; pi < (int)state.path.size() - 1; pi++) {
@@ -343,34 +309,13 @@ void dfs(DFSState& state, int blockId, Timing cost) {
                                 if (inCycle[exitTarget] || state.visited[exitTarget]) continue;
 
                                 hasForwardEdge = true;
-
-                                // Cost to travel through back-edge and cycle to exit
-                                Timing travel = {backEdgeCost, backEdgeCost};
-                                for (int pj = targetPathIdx; ; pj++) {
-                                    int bi = state.path[pj];
-                                    travel += state.blocks[bi].body;
-                                    if (bi == cycleBlockId) break;
-                                    if (pj + 1 < (int)state.path.size()) {
-                                        int nextBi = state.path[pj + 1];
-                                        for (auto& e : state.blocks[bi].successors) {
-                                            if (e.target == nextBi) {
-                                                travel += {e.cost, e.cost};
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-
-                                dfs(state, exitTarget,
-                                    cur + travel + exitEdge.cost);
+                                dfs(state, exitTarget);
                             }
                         }
 
-                        // Release cycle guard
+                        // Release cycle guard (including header)
                         for (int pi = targetPathIdx; pi < (int)state.path.size(); pi++) {
-                            if (pi != targetPathIdx) {
-                                state.cycleGuard[state.path[pi]]--;
-                            }
+                            state.cycleGuard[state.path[pi]]--;
                         }
                     }
                 }
@@ -378,12 +323,12 @@ void dfs(DFSState& state, int blockId, Timing cost) {
             }
 
             hasForwardEdge = true;
-            dfs(state, target, cur + edge.cost);
+            dfs(state, target);
         }
 
         // Dead end or infinite loop (no forward edges found)
         if (!hasForwardEdge) {
-            state.results.push_back({state.path, state.loops, cur});
+            state.results.push_back({state.path, state.loops, {}});
         }
 
         state.loops.resize(loopsBefore);
@@ -391,6 +336,119 @@ void dfs(DFSState& state, int blockId, Timing cost) {
 
     state.path.pop_back();
     state.visited[blockId] = false;
+}
+
+// --- Path cost computation ---
+
+// Finds the edge cost from one block to another, or -1 if no edge exists.
+int findEdgeCost(const std::vector<BasicBlock>& blocks, int fromId, int toId) {
+    for (auto& e : blocks[fromId].successors) {
+        if (e.target == toId) return e.cost;
+    }
+    return -1;
+}
+
+// Recursively computes the cost of a path segment [from..to], evaluating
+// loops from their annotations. For a loop with count N:
+//   body + (body + back_edge) * (N-1) + continuation
+// where continuation depends on the exit type (normal, mid-exit, or dead-end).
+// skipLoop excludes a loop from matching (prevents infinite recursion when
+// computing a loop's own body).
+Timing computeSegment(const PathResult& p, int from, int to,
+                      const std::vector<BasicBlock>& blocks,
+                      int skipLoop = -1) {
+    Timing cost;
+    int i = from;
+
+    while (i <= to) {
+        // Find the widest loop starting at position i
+        const LoopAnnotation* loop = nullptr;
+        int loopIdx = -1;
+        for (int li = 0; li < (int)p.loops.size(); li++) {
+            if (li == skipLoop) continue;
+            auto& la = p.loops[li];
+            if (la.startIdx == i && la.endIdx <= to) {
+                if (!loop || la.endIdx > loop->endIdx) {
+                    loop = &la;
+                    loopIdx = li;
+                }
+            }
+        }
+
+        if (loop) {
+            // One iteration body (block bodies + inter-block edges, no latch edge)
+            Timing body = computeSegment(p, loop->startIdx, loop->endIdx, blocks, loopIdx);
+
+            // Back-edge: from latch back to header
+            int latchId = p.blocks[loop->endIdx];
+            int headerId = p.blocks[loop->startIdx];
+            int back = std::max(0, findEdgeCost(blocks, latchId, headerId));
+
+            // Extra iterations (each takes the back-edge)
+            int extraIters = std::max(0, loop->count - 1);
+            cost += body + (body + back) * extraIters;
+
+            // Continuation: depends on how the loop exits
+            if (loop->endIdx + 1 <= to) {
+                int nextId = p.blocks[loop->endIdx + 1];
+                int latchExit = findEdgeCost(blocks, latchId, nextId);
+
+                if (latchExit >= 0) {
+                    // Normal exit from latch
+                    cost += {latchExit, latchExit};
+                } else {
+                    // Mid-exit: find which cycle block reaches the next block
+                    for (int pi = loop->startIdx; pi < loop->endIdx; pi++) {
+                        int midExit = findEdgeCost(blocks, p.blocks[pi], nextId);
+                        if (midExit >= 0) {
+                            // One extra partial iteration: back-edge + travel to exit block
+                            Timing partial = computeSegment(p, loop->startIdx, pi, blocks, loopIdx);
+                            cost += Timing{back, back} + partial + Timing{midExit, midExit};
+                            break;
+                        }
+                    }
+                }
+            }
+
+            i = loop->endIdx + 1;
+        } else {
+            // Plain block
+            cost += blocks[p.blocks[i]].body;
+
+            // Edge to next block (if not the last position in this segment)
+            if (i < to) {
+                int edgeCost = findEdgeCost(blocks, p.blocks[i], p.blocks[i + 1]);
+                if (edgeCost > 0) {
+                    cost += {edgeCost, edgeCost};
+                }
+            }
+
+            i++;
+        }
+    }
+
+    return cost;
+}
+
+// Computes total cycle cost for a path from its block sequence and loop annotations.
+Timing computePathCost(const PathResult& p,
+                       const std::vector<BasicBlock>& blocks,
+                       const std::vector<SourceLine>& lines) {
+    if (p.blocks.empty()) return {};
+
+    Timing cost = computeSegment(p, 0, (int)p.blocks.size() - 1, blocks);
+
+    // Add exit instruction cost (rts/rte/rtr) if the last block is an exit
+    int lastBlockId = p.blocks.back();
+    auto& lastBlock = blocks[lastBlockId];
+    if (lastBlock.isExit) {
+        int lastIdx = lastBlock.lastLine;
+        if (lastIdx >= 0 && lastIdx < (int)lines.size() && lines[lastIdx].inst) {
+            cost += lines[lastIdx].timing;
+        }
+    }
+
+    return cost;
 }
 
 // --- Branch size fixup ---
@@ -497,10 +555,15 @@ std::vector<FunctionResult> analyzeSource(std::vector<SourceLine>& lines,
 
         // Enumerate paths via DFS
         if (!fr.blocks.empty()) {
-            DFSState state{fr.blocks, fr.lines, loopCount, fr.paths, {}, {}, {}, {}};
+            DFSState state{fr.blocks, loopCount, fr.paths, {}, {}, {}, {}};
             state.visited.resize(fr.blocks.size(), false);
             state.cycleGuard.resize(fr.blocks.size(), 0);
-            dfs(state, 0, Timing{});
+            dfs(state, 0);
+        }
+
+        // Compute cycle costs from path structure
+        for (auto& p : fr.paths) {
+            p.cycles = computePathCost(p, fr.blocks, fr.lines);
         }
 
         // Find min/max across all paths
