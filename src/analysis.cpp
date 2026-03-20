@@ -3,6 +3,7 @@
 #include "m68k.h"
 #include <algorithm>
 #include <climits>
+#include <span>
 #include <unordered_map>
 
 namespace {
@@ -211,22 +212,33 @@ void buildEdges(std::vector<BasicBlock>& blocks,
 
 // Sums instruction timing for a basic block, excluding the terminator.
 // Terminator cost is carried on edges so the DFS can distinguish taken/not-taken.
-void computeBodyCost(BasicBlock& b, const std::vector<SourceLine>& lines) {
-    b.body.a = 0;
-    b.body.b = 0;
-
+void computeBodyCost(BasicBlock& b, std::vector<SourceLine>& lines,
+                     TimingBase& timing) {
+    // Collect body instructions (excludes terminator) for span-based timing,
+    // which allows CPUs like the 060 to model dual-issue pairing.
+    std::vector<Instruction> body;
+    std::vector<int> bodyLines;  // maps body index → lines index
     for (int i = b.firstLine; i <= b.lastLine; i++) {
         if (i < 0 || i >= (int)lines.size()) continue;
         if (!lines[i].inst) continue;
+        if (i == b.lastLine && isBlockTerminator(lines[i].inst->mnemonic)) continue;
+        body.push_back(*lines[i].inst);
+        bodyLines.push_back(i);
+    }
 
-        // Terminator cost goes into edges, not body
-        if (i == b.lastLine && isBlockTerminator(lines[i].inst->mnemonic)) {
-            continue;
+    b.body = timing.time(std::span<const Instruction>(body));
+
+    // Mark paired/stalled instructions for display
+    auto paired = timing.pairings(std::span<const Instruction>(body));
+    auto stalled = timing.stalls(std::span<const Instruction>(body));
+    for (size_t j = 0; j < bodyLines.size(); j++) {
+        if (paired[j]) {
+            lines[bodyLines[j]].paired = true;
+            lines[bodyLines[j]].timing = {0, 0};
+        } else if (stalled[j]) {
+            lines[bodyLines[j]].stalled = true;
+            lines[bodyLines[j]].timing += {1, 1};
         }
-
-        auto t = lines[i].timing;
-        b.body.a += t.a;
-        b.body.b += t.b;
     }
 
     if (b.body.a < 0 || b.body.b < 0) {
@@ -547,7 +559,7 @@ std::vector<FunctionResult> analyzeSource(std::vector<SourceLine>& lines,
 
         // Compute body costs
         for (auto& b : fr.blocks) {
-            computeBodyCost(b, fr.lines);
+            computeBodyCost(b, fr.lines, timing);
         }
 
         // Build edges

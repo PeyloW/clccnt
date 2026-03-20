@@ -68,6 +68,24 @@ bool isPairable(const Instruction& inst) {
     }
 }
 
+// Tests whether two consecutive instructions can be dual-issued (Table 10-1).
+bool canPair(const Instruction& a, const Instruction& b) {
+    if (!isPairable(a) || !isPairable(b)) return false;
+
+    // Test 4: only one memory operand across the pair
+    bool aMem = (a.src && isMem(*a.src)) || (a.dst && isMem(*a.dst));
+    bool bMem = (b.src && isMem(*b.src)) || (b.dst && isMem(*b.dst));
+    if (aMem && bMem) return false;
+
+    // Tests 5/6: no register conflicts
+    auto ra = regUsage(a);
+    auto rb = regUsage(b);
+    if (ra.write & rb.read) return false;
+    if (ra.write & rb.write) return false;
+
+    return true;
+}
+
 // MC68060 timing engine.
 // Flat timing model: most instructions are 1 cycle. Superscalar dual-issue in time(span).
 class Timing060 : public TimingBase {
@@ -83,35 +101,31 @@ public:
         while (i < block.size()) {
             auto t = time(block[i]);
 
-            // Try to pair with next instruction (Table 10-1)
-            if (i + 1 < block.size() &&
-                isPairable(block[i]) &&
-                isPairable(block[i + 1])) {
-                auto prev = regUsage(block[i]);
-                auto next = regUsage(block[i + 1]);
-
-                // Test 4: only one memory operand across the pair
-                bool prevMem = (block[i].src && isMem(*block[i].src)) ||
-                               (block[i].dst && isMem(*block[i].dst));
-                bool nextMem = (block[i+1].src && isMem(*block[i+1].src)) ||
-                               (block[i+1].dst && isMem(*block[i+1].dst));
-
-                // Tests 5/6: no register conflicts
-                bool noConflict = !(prev.write & next.read) &&
-                                  !(prev.write & next.write);
-
-                if (noConflict && !(prevMem && nextMem)) {
-                    auto t2 = time(block[i + 1]);
-                    total += {std::max(t.a, t2.a), std::max(t.b, t2.b)};
-                    i += 2;
-                    continue;
-                }
+            if (i + 1 < block.size() && canPair(block[i], block[i + 1])) {
+                auto t2 = time(block[i + 1]);
+                total += {std::max(t.a, t2.a), std::max(t.b, t2.b)};
+                i += 2;
+                continue;
             }
 
             total += t;
             i++;
         }
         return total;
+    }
+
+    std::vector<bool> pairings(std::span<const Instruction> block) override {
+        std::vector<bool> result(block.size(), false);
+        size_t i = 0;
+        while (i < block.size()) {
+            if (i + 1 < block.size() && canPair(block[i], block[i + 1])) {
+                result[i + 1] = true;
+                i += 2;
+            } else {
+                i++;
+            }
+        }
+        return result;
     }
 
     int busAccessCycles() const override { return 1; }

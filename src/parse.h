@@ -14,6 +14,8 @@ struct SourceLine {
     Timing timing;
     int instSize = 0;
     int byteOffset = 0;
+    bool paired = false;
+    bool stalled = false;
 };
 
 // Parses a single assembly text line into an Instruction.

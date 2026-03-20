@@ -107,15 +107,40 @@ RegUsage regUsage(const Instruction& inst) {
         }
     };
 
-    if (inst.src) addRead(*inst.src);
+    // Single-operand instructions: operand is in src, no dst.
+    // The operand is the target being read+written (or just written for CLR/Scc).
+    bool singleOp = !inst.dst && inst.src &&
+        (inst.mnemonic == Mnemonic::clr || inst.mnemonic == Mnemonic::neg ||
+         inst.mnemonic == Mnemonic::negx || inst.mnemonic == Mnemonic::not_ ||
+         inst.mnemonic == Mnemonic::tst || inst.mnemonic == Mnemonic::nbcd ||
+         inst.mnemonic == Mnemonic::tas || isScc(inst.mnemonic) ||
+         isShift(inst.mnemonic));
+
+    if (singleOp) {
+        auto& ea = *inst.src;
+        // TST is read-only; CLR/Scc are pure write; rest are read+write
+        if (inst.mnemonic == Mnemonic::tst) {
+            addRead(ea);
+        } else if (inst.mnemonic == Mnemonic::clr || isScc(inst.mnemonic)) {
+            if (isMem(ea)) {
+                addRead(ea);  // address calc reads base/index regs
+            }
+            addWrite(ea);
+        } else {
+            addRead(ea);
+            addWrite(ea);
+        }
+    } else {
+        if (inst.src) addRead(*inst.src);
+    }
+
     if (inst.dst) {
         // For most instructions, dst is both read and written if it's a register
         auto m = inst.dst->mode;
         if (m == AddrMode::dn || m == AddrMode::an) {
-            // Pure write for MOVE/LEA/MOVEQ/CLR, read+write for ALU
+            // Pure write for MOVE/LEA/MOVEQ, read+write for ALU
             if (inst.mnemonic == Mnemonic::move || inst.mnemonic == Mnemonic::movea ||
-                inst.mnemonic == Mnemonic::moveq || inst.mnemonic == Mnemonic::lea ||
-                inst.mnemonic == Mnemonic::clr) {
+                inst.mnemonic == Mnemonic::moveq || inst.mnemonic == Mnemonic::lea) {
                 addWrite(*inst.dst);
             } else {
                 addRead(*inst.dst);

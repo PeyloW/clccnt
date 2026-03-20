@@ -136,16 +136,6 @@ void printVerbose(const FunctionResult& fr) {
         }
     }
 
-    // Compute block body totals (sum of instruction timing within each block)
-    std::vector<Timing> blockTotal(fr.blocks.size());
-    for (auto& b : fr.blocks) {
-        for (int i = b.firstLine; i <= b.lastLine; i++) {
-            if (i < 0 || i >= (int)fr.lines.size()) continue;
-            if (!fr.lines[i].inst) continue;
-            blockTotal[b.id] += fr.lines[i].timing;
-        }
-    }
-
     for (auto& b : fr.blocks) {
         int ind = 2 * loopDepth[b.id];
         if (!b.label.empty()) {
@@ -165,22 +155,27 @@ void printVerbose(const FunctionResult& fr) {
             bool isLast = (i == b.lastLine);
 
             int pad = std::max(1, 36 - ind);
+            const char* annot = sl.paired ? "^" : sl.stalled ? "+" : " ";
             if (isCondBranch(m) || isDbcc(m)) {
-                std::printf("  %4d: %*s%-*s %4d  %4d",
+                std::printf("  %4d: %*s%-*s %4d%s %4d",
                     sl.lineNum, ind, "", pad, instStr.c_str(),
-                    t.b, t.a);
+                    t.b, annot, t.a);
             } else if (t.a != t.b) {
-                std::printf("  %4d: %*s%-*s %4d  %4d",
+                std::printf("  %4d: %*s%-*s %4d%s %4d",
                     sl.lineNum, ind, "", pad, instStr.c_str(),
-                    t.min(), t.max());
+                    t.min(), annot, t.max());
             } else {
-                std::printf("  %4d: %*s%-*s %4d      ",
+                std::printf("  %4d: %*s%-*s %4d%s     ",
                     sl.lineNum, ind, "", pad, instStr.c_str(),
-                    t.a);
+                    t.a, annot);
             }
 
             if (isLast) {
-                auto& bt = blockTotal[b.id];
+                // Block total: body (with pairing) + terminator
+                Timing bt = b.body;
+                if (isBlockTerminator(m)) {
+                    bt += t;
+                }
                 if (bt.a != bt.b) {
                     std::printf("  = %5d %5d", bt.min(), bt.max());
                 } else {

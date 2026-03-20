@@ -7,6 +7,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <vector>
 
 // I-cache or D-cache geometry for a CPU model.
 struct CacheConfig {
@@ -94,6 +95,18 @@ public:
             total += time(inst);
         }
         return total;
+    }
+
+    // Returns a vector marking which instructions in a block are paired with
+    // the previous instruction (dual-issue). Default: no pairing.
+    virtual std::vector<bool> pairings(std::span<const Instruction> block) {
+        return std::vector<bool>(block.size(), false);
+    }
+
+    // Returns a vector marking which instructions in a block are stalled
+    // by a pipeline hazard from the previous instruction. Default: no stalls.
+    virtual std::vector<bool> stalls(std::span<const Instruction> block) {
+        return std::vector<bool>(block.size(), false);
     }
 
     virtual int busAccessCycles() const { return 4; }

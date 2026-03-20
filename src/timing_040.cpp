@@ -64,6 +64,18 @@ public:
         return total;
     }
 
+    std::vector<bool> stalls(std::span<const Instruction> block) override {
+        std::vector<bool> result(block.size(), false);
+        for (size_t i = 1; i < block.size(); i++) {
+            auto prev = regUsage(block[i - 1]);
+            auto next = regUsage(block[i]);
+            if (prev.write & next.read) {
+                result[i] = true;
+            }
+        }
+        return result;
+    }
+
     int busAccessCycles() const override { return 2; }
     int busWidth() const override { return 4; }
     const char* name() const override { return "MC68040"; }
