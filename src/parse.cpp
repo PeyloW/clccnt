@@ -345,12 +345,20 @@ uint16_t parseRegList(std::string_view s) {
             int r1 = low[pos+1] - '0';
             pos += 2;
 
-            // Check for range: d0-d3
+            // Check for range: d0-d3 or d0-3 (abbreviated)
             if (pos + 2 < low.size() && low[pos] == '-' &&
                 low[pos+1] == (isA ? 'a' : 'd') &&
                 low[pos+2] >= '0' && low[pos+2] <= '7') {
                 int r2 = low[pos+2] - '0';
                 pos += 3;
+                int base = isA ? 8 : 0;
+                for (int i = r1; i <= r2; i++) {
+                    mask |= regBit(base + i);
+                }
+            } else if (pos + 1 < low.size() && low[pos] == '-' &&
+                       low[pos+1] >= '0' && low[pos+1] <= '7') {
+                int r2 = low[pos+1] - '0';
+                pos += 2;
                 int base = isA ? 8 : 0;
                 for (int i = r1; i <= r2; i++) {
                     mask |= regBit(base + i);
