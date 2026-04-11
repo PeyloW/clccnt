@@ -259,11 +259,26 @@ struct DFSState {
     std::vector<bool> visited;
     std::vector<LoopAnnotation> loops;
     std::vector<int> cycleGuard; // blocks in active cycles (counter for nesting)
+    std::vector<int> cycleHeaderGuard; // blocks that are active cycle headers (counter)
+    std::vector<bool> reenteredHeader; // cycle headers with exit-path re-entry
 };
 
 // Recursively enumerates execution paths through the CFG.
 // Back-edges are treated as loops; exit edges from cycle blocks are followed.
 // Cost computation is deferred to computePathCost() after enumeration.
+int findInPath(const DFSState& state, int fromIdx, int blockId) {
+    for (int pi = fromIdx; pi >= 0; pi--) {
+        if (state.path[pi] == blockId) return pi;
+    }
+    return -1;
+}
+
+void adjustCycleGuard(DFSState& state, int startIdx, int endIdx, int delta) {
+    for (int pi = startIdx; pi <= endIdx; pi++) {
+        state.cycleGuard[state.path[pi]] += delta;
+    }
+}
+
 void dfs(DFSState& state, int blockId) {
     if (blockId < 0 || blockId >= (int)state.blocks.size()) {
         throw Error{2, "internal: dfs blockId " + std::to_string(blockId) + " out of range"};
@@ -271,6 +286,13 @@ void dfs(DFSState& state, int blockId) {
     auto& b = state.blocks[blockId];
     state.path.push_back(blockId);
     state.visited[blockId] = true;
+    const int latchIdx = (int)state.path.size() - 1;
+
+    // Cycle guard ranges to release when this block's DFS returns.
+    // Deferred so the latch's forward successors are explored under the guard,
+    // preventing false nested loops when they loop back to the same header.
+    struct GuardRange { int startIdx; int endIdx; };
+    std::vector<GuardRange> deferredGuards;
 
     if (b.isExit) {
         state.results.push_back({state.path, state.loops, {}});
@@ -284,34 +306,77 @@ void dfs(DFSState& state, int blockId) {
 
             // Back-edge (loop): target is on the current DFS path
             if (state.visited[target]) {
-                // Skip phantom back-edges to blocks in an active cycle
-                if (state.cycleGuard[target] > 0) continue;
-                if (state.loopCount > 0) {
-                    // Find the target in the DFS path to identify the cycle
-                    int targetPathIdx = -1;
-                    for (int pi = (int)state.path.size() - 1; pi >= 0; pi--) {
-                        if (state.path[pi] == target) {
-                            targetPathIdx = pi;
-                            break;
+                // Skip phantom back-edges to blocks in an active cycle.
+                // If the target is a guarded cycle header, record the
+                // re-entry: an exit path from that cycle leads back to it,
+                // meaning any outer loop sharing the same iteration space
+                // should not multiply independently.
+                if (state.cycleGuard[target] > 0) {
+                    // Mark re-entry only when the target is an active
+                    // cycle HEADER (not just any guarded member) and the
+                    // source is deeper in the path (exit-path re-entry,
+                    // not normal predecessor flow).
+                    if (state.cycleHeaderGuard[target] > 0) {
+                        int targetPos = findInPath(state, latchIdx, target);
+                        if (targetPos >= 0 && latchIdx > targetPos + 1) {
+                            state.reenteredHeader[target] = true;
                         }
                     }
+                    continue;
+                }
+                if (state.loopCount > 0) {
+                    // Find the target in the DFS path to identify the cycle
+                    int targetPathIdx = findInPath(state, latchIdx, target);
 
                     if (targetPathIdx >= 0) {
-                        // Record loop annotation for display
-                        state.loops.push_back({targetPathIdx,
-                            (int)state.path.size() - 1, state.loopCount});
-
-                        // Find exit paths from cycle blocks
-                        std::vector<bool> inCycle(state.blocks.size(), false);
-                        for (int pi = targetPathIdx; pi < (int)state.path.size(); pi++) {
-                            inCycle[state.path[pi]] = true;
-                            // Guard cycle blocks to prevent phantom back-edges.
-                            // The header is guarded here to prevent exit-edge
-                            // targets from creating false nested loops back to it.
-                            state.cycleGuard[state.path[pi]]++;
+                        // Widen cycle: if the latch also has edges to DFS
+                        // path ancestors of the header, include them in
+                        // the cycle. This prevents false nested loops when
+                        // alternate paths from the latch reach the header
+                        // via ancestor blocks (same logical loop).
+                        // Ignores cycleGuard intentionally: widening is
+                        // additive and must cover ancestors regardless of
+                        // whether they belong to an already-guarded cycle.
+                        int loopStartIdx = targetPathIdx;
+                        for (auto& otherEdge : b.successors) {
+                            int ot = otherEdge.target;
+                            if (ot < 0 || ot >= (int)state.blocks.size()) continue;
+                            if (ot == target || !state.visited[ot]) continue;
+                            for (int pi = loopStartIdx - 1; pi >= 0; pi--) {
+                                if (state.path[pi] == ot) {
+                                    loopStartIdx = pi;
+                                    break;
+                                }
+                            }
                         }
 
-                        for (int pi = targetPathIdx; pi < (int)state.path.size() - 1; pi++) {
+                        // If the loop body contains a sub-loop header
+                        // that was re-entered from its own exit path,
+                        // this loop wraps a sub-loop covering the same
+                        // iteration space. Reduce to a single traversal
+                        // so iterations are not double-counted.
+                        int count = state.loopCount;
+                        for (int pi = loopStartIdx; pi <= latchIdx; pi++) {
+                            if (state.reenteredHeader[state.path[pi]]) {
+                                count = 1;
+                                break;
+                            }
+                        }
+
+                        state.loops.push_back({loopStartIdx,
+                            latchIdx, count});
+
+                        // Guard cycle blocks to prevent phantom back-edges
+                        // from exit-edge targets back to the header.
+                        std::vector<bool> inCycle(state.blocks.size(), false);
+                        for (int pi = loopStartIdx; pi <= latchIdx; pi++) {
+                            inCycle[state.path[pi]] = true;
+                        }
+                        adjustCycleGuard(state, loopStartIdx, latchIdx, +1);
+                        state.cycleHeaderGuard[state.path[loopStartIdx]]++;
+
+                        // Find exit paths from cycle blocks
+                        for (int pi = loopStartIdx; pi < latchIdx; pi++) {
                             int cycleBlockId = state.path[pi];
                             auto& cb = state.blocks[cycleBlockId];
 
@@ -325,9 +390,17 @@ void dfs(DFSState& state, int blockId) {
                             }
                         }
 
-                        // Release cycle guard (including header)
-                        for (int pi = targetPathIdx; pi < (int)state.path.size(); pi++) {
-                            state.cycleGuard[state.path[pi]]--;
+                        // Self-loops (single-block cycles) release the guard
+                        // immediately: a descendant back-edge to the same block
+                        // is a genuinely separate loop level (e.g. column loop
+                        // re-entering an inner-product self-loop).
+                        // Multi-block cycles defer the release so the latch's
+                        // forward successors are explored under the guard.
+                        if (loopStartIdx == latchIdx) {
+                            adjustCycleGuard(state, loopStartIdx, latchIdx, -1);
+                            state.cycleHeaderGuard[state.path[loopStartIdx]]--;
+                        } else {
+                            deferredGuards.push_back({loopStartIdx, latchIdx});
                         }
                     }
                 }
@@ -346,8 +419,18 @@ void dfs(DFSState& state, int blockId) {
         state.loops.resize(loopsBefore);
     }
 
+    // Release deferred cycle guards.
+    // Safe: recursive dfs() calls restore path to its pre-call state.
+    for (auto& guard : deferredGuards) {
+        adjustCycleGuard(state, guard.startIdx, guard.endIdx, -1);
+        state.cycleHeaderGuard[state.path[guard.startIdx]]--;
+    }
+
     state.path.pop_back();
     state.visited[blockId] = false;
+    // reenteredHeader is NOT cleared here: it's a structural property
+    // that persists for the entire function analysis, so outer loops
+    // created after the DFS backtracks can still see it.
 }
 
 // --- Path cost computation ---
@@ -567,9 +650,15 @@ std::vector<FunctionResult> analyzeSource(std::vector<SourceLine>& lines,
 
         // Enumerate paths via DFS
         if (!fr.blocks.empty()) {
-            DFSState state{fr.blocks, loopCount, fr.paths, {}, {}, {}, {}};
-            state.visited.resize(fr.blocks.size(), false);
-            state.cycleGuard.resize(fr.blocks.size(), 0);
+            DFSState state{
+                .blocks = fr.blocks,
+                .loopCount = loopCount,
+                .results = fr.paths,
+                .visited = std::vector<bool>(fr.blocks.size(), false),
+                .cycleGuard = std::vector<int>(fr.blocks.size(), 0),
+                .cycleHeaderGuard = std::vector<int>(fr.blocks.size(), 0),
+                .reenteredHeader = std::vector<bool>(fr.blocks.size(), false),
+            };
             dfs(state, 0);
         }
 
